@@ -5,11 +5,11 @@ package model // import "miniflux.app/v2/internal/model"
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"time"
 
 	"miniflux.app/v2/internal/config"
-	"miniflux.app/v2/internal/http/client"
 )
 
 // List of supported schedulers.
@@ -28,6 +28,7 @@ type Feed struct {
 	FeedURL                     string    `json:"feed_url"`
 	SiteURL                     string    `json:"site_url"`
 	Title                       string    `json:"title"`
+	Description                 string    `json:"description"`
 	CheckedAt                   time.Time `json:"checked_at"`
 	NextCheckAt                 time.Time `json:"next_check_at"`
 	EtagHeader                  string    `json:"etag_header"`
@@ -49,14 +50,23 @@ type Feed struct {
 	IgnoreHTTPCache             bool      `json:"ignore_http_cache"`
 	AllowSelfSignedCertificates bool      `json:"allow_self_signed_certificates"`
 	FetchViaProxy               bool      `json:"fetch_via_proxy"`
-	Category                    *Category `json:"category,omitempty"`
-	Entries                     Entries   `json:"entries,omitempty"`
-	IconURL                     string    `json:"-"`
-	Icon                        *FeedIcon `json:"icon"`
 	HideGlobally                bool      `json:"hide_globally"`
-	UnreadCount                 int       `json:"-"`
-	ReadCount                   int       `json:"-"`
+	DisableHTTP2                bool      `json:"disable_http2"`
 	AppriseServiceURLs          string    `json:"apprise_service_urls"`
+	NtfyEnabled                 bool      `json:"ntfy_enabled"`
+	NtfyPriority                int       `json:"ntfy_priority"`
+
+	// Non-persisted attributes
+	Category *Category `json:"category,omitempty"`
+	Icon     *FeedIcon `json:"icon"`
+	Entries  Entries   `json:"entries,omitempty"`
+
+	// Internal attributes (not exposed in the API and not persisted in the database)
+	TTL                    int    `json:"-"`
+	IconURL                string `json:"-"`
+	UnreadCount            int    `json:"-"`
+	ReadCount              int    `json:"-"`
+	NumberOfVisibleEntries int    `json:"-"`
 }
 
 type FeedCounters struct {
@@ -75,20 +85,13 @@ func (f *Feed) String() string {
 	)
 }
 
-// WithClientResponse updates feed attributes from an HTTP request.
-func (f *Feed) WithClientResponse(response *client.Response) {
-	f.EtagHeader = response.ETag
-	f.LastModifiedHeader = response.LastModified
-	f.FeedURL = response.EffectiveURL
-}
-
 // WithCategoryID initializes the category attribute of the feed.
 func (f *Feed) WithCategoryID(categoryID int64) {
 	f.Category = &Category{ID: categoryID}
 }
 
-// WithError adds a new error message and increment the error counter.
-func (f *Feed) WithError(message string) {
+// WithTranslatedErrorMessage adds a new error message and increment the error counter.
+func (f *Feed) WithTranslatedErrorMessage(message string) {
 	f.ParsingErrorCount++
 	f.ParsingErrorMsg = message
 }
@@ -109,21 +112,28 @@ func (f *Feed) CheckedNow() {
 }
 
 // ScheduleNextCheck set "next_check_at" of a feed based on the scheduler selected from the configuration.
-func (f *Feed) ScheduleNextCheck(weeklyCount int) {
-	switch config.Opts.PollingScheduler() {
-	case SchedulerEntryFrequency:
-		var intervalMinutes int
-		if weeklyCount == 0 {
+func (f *Feed) ScheduleNextCheck(weeklyCount int, refreshDelayInMinutes int) {
+	f.TTL = refreshDelayInMinutes
+
+	// Default to the global config Polling Frequency.
+	intervalMinutes := config.Opts.SchedulerRoundRobinMinInterval()
+
+	if config.Opts.PollingScheduler() == SchedulerEntryFrequency {
+		if weeklyCount <= 0 {
 			intervalMinutes = config.Opts.SchedulerEntryFrequencyMaxInterval()
 		} else {
 			intervalMinutes = int(math.Round(float64(7*24*60) / float64(weeklyCount*config.Opts.SchedulerEntryFrequencyFactor())))
-			intervalMinutes = int(math.Min(float64(intervalMinutes), float64(config.Opts.SchedulerEntryFrequencyMaxInterval())))
-			intervalMinutes = int(math.Max(float64(intervalMinutes), float64(config.Opts.SchedulerEntryFrequencyMinInterval())))
+			intervalMinutes = min(intervalMinutes, config.Opts.SchedulerEntryFrequencyMaxInterval())
+			intervalMinutes = max(intervalMinutes, config.Opts.SchedulerEntryFrequencyMinInterval())
 		}
-		f.NextCheckAt = time.Now().Add(time.Minute * time.Duration(intervalMinutes))
-	default:
-		f.NextCheckAt = time.Now().Add(time.Minute * time.Duration(config.Opts.PollingFrequency()))
 	}
+
+	// If the feed has a TTL or a Retry-After defined, we use it to make sure we don't check it too often.
+	if refreshDelayInMinutes > 0 && refreshDelayInMinutes > intervalMinutes {
+		intervalMinutes = refreshDelayInMinutes
+	}
+
+	f.NextCheckAt = time.Now().Add(time.Minute * time.Duration(intervalMinutes))
 }
 
 // FeedCreationRequest represents the request to create a feed.
@@ -146,6 +156,15 @@ type FeedCreationRequest struct {
 	KeeplistRules               string `json:"keeplist_rules"`
 	HideGlobally                bool   `json:"hide_globally"`
 	UrlRewriteRules             string `json:"urlrewrite_rules"`
+	DisableHTTP2                bool   `json:"disable_http2"`
+}
+
+type FeedCreationRequestFromSubscriptionDiscovery struct {
+	Content      io.ReadSeeker
+	ETag         string
+	LastModified string
+
+	FeedCreationRequest
 }
 
 // FeedModificationRequest represents the request to update a feed.
@@ -153,6 +172,7 @@ type FeedModificationRequest struct {
 	FeedURL                     *string `json:"feed_url"`
 	SiteURL                     *string `json:"site_url"`
 	Title                       *string `json:"title"`
+	Description                 *string `json:"description"`
 	ScraperRules                *string `json:"scraper_rules"`
 	RewriteRules                *string `json:"rewrite_rules"`
 	BlocklistRules              *string `json:"blocklist_rules"`
@@ -170,6 +190,7 @@ type FeedModificationRequest struct {
 	AllowSelfSignedCertificates *bool   `json:"allow_self_signed_certificates"`
 	FetchViaProxy               *bool   `json:"fetch_via_proxy"`
 	HideGlobally                *bool   `json:"hide_globally"`
+	DisableHTTP2                *bool   `json:"disable_http2"`
 }
 
 // Patch updates a feed with modified values.
@@ -184,6 +205,10 @@ func (f *FeedModificationRequest) Patch(feed *Feed) {
 
 	if f.Title != nil && *f.Title != "" {
 		feed.Title = *f.Title
+	}
+
+	if f.Description != nil && *f.Description != "" {
+		feed.Description = *f.Description
 	}
 
 	if f.ScraperRules != nil {
@@ -252,6 +277,10 @@ func (f *FeedModificationRequest) Patch(feed *Feed) {
 
 	if f.HideGlobally != nil {
 		feed.HideGlobally = *f.HideGlobally
+	}
+
+	if f.DisableHTTP2 != nil {
+		feed.DisableHTTP2 = *f.DisableHTTP2
 	}
 }
 
