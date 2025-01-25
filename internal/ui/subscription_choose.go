@@ -18,9 +18,6 @@ import (
 )
 
 func (h *handler) showChooseSubscriptionPage(w http.ResponseWriter, r *http.Request) {
-	sess := session.New(h.store, request.SessionID(r))
-	view := view.New(h.tpl, r, sess)
-
 	user, err := h.store.UserByID(request.UserID(r))
 	if err != nil {
 		html.ServerError(w, r, err)
@@ -33,6 +30,8 @@ func (h *handler) showChooseSubscriptionPage(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	sess := session.New(h.store, request.SessionID(r))
+	view := view.New(h.tpl, r, sess)
 	view.Set("categories", categories)
 	view.Set("menu", "feeds")
 	view.Set("user", user)
@@ -41,14 +40,14 @@ func (h *handler) showChooseSubscriptionPage(w http.ResponseWriter, r *http.Requ
 	view.Set("defaultUserAgent", config.Opts.HTTPClientUserAgent())
 
 	subscriptionForm := form.NewSubscriptionForm(r)
-	if err := subscriptionForm.Validate(); err != nil {
+	if validationErr := subscriptionForm.Validate(); validationErr != nil {
 		view.Set("form", subscriptionForm)
-		view.Set("errorMessage", err.Error())
+		view.Set("errorMessage", validationErr.Translate(user.Language))
 		html.OK(w, r, view.Render("add_subscription"))
 		return
 	}
 
-	feed, err := feedHandler.CreateFeed(h.store, user.ID, &model.FeedCreationRequest{
+	feed, localizedError := feedHandler.CreateFeed(h.store, user.ID, &model.FeedCreationRequest{
 		CategoryID:                  subscriptionForm.CategoryID,
 		FeedURL:                     subscriptionForm.URL,
 		Crawler:                     subscriptionForm.Crawler,
@@ -63,10 +62,11 @@ func (h *handler) showChooseSubscriptionPage(w http.ResponseWriter, r *http.Requ
 		KeeplistRules:               subscriptionForm.KeeplistRules,
 		UrlRewriteRules:             subscriptionForm.UrlRewriteRules,
 		FetchViaProxy:               subscriptionForm.FetchViaProxy,
+		DisableHTTP2:                subscriptionForm.DisableHTTP2,
 	})
-	if err != nil {
+	if localizedError != nil {
 		view.Set("form", subscriptionForm)
-		view.Set("errorMessage", err)
+		view.Set("errorMessage", localizedError.Translate(user.Language))
 		html.OK(w, r, view.Render("add_subscription"))
 		return
 	}

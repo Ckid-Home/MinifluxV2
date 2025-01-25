@@ -7,6 +7,14 @@ import (
 	"testing"
 )
 
+func FuzzParse(f *testing.F) {
+	f.Add("2017-12-22T22:09:49+00:00")
+	f.Add("Fri, 31 Mar 2023 20:19:00 America/Los_Angeles")
+	f.Fuzz(func(t *testing.T, date string) {
+		Parse(date)
+	})
+}
+
 func TestParseEmptyDate(t *testing.T) {
 	if _, err := Parse("  "); err == nil {
 		t.Fatalf(`Empty dates should return an error`)
@@ -214,24 +222,33 @@ func TestParseWeirdDateFormat(t *testing.T) {
 		"Jun 23, 2023 19:00 GMT",
 		"09/15/2014 4:20 pm PST",
 		"Fri, 23rd Jun 2023 09:32:20 GMT",
+		"Sat, Oct 28 2023 08:28:28 PM",
+		"Monday, October 6, 2023 - 16:29\n",
+		"10/30/23 21:55:58",
+		"30.10.23",
 	}
 
 	for _, date := range dates {
 		if _, err := Parse(date); err != nil {
-			t.Errorf(`Unable to parse date: %q`, date)
+			t.Errorf(`Unable to parse date: %q (%v)`, date, err)
 		}
 	}
 }
 
 func TestParseDateWithTimezoneOutOfRange(t *testing.T) {
-	date, err := Parse("2023-05-29 00:00:00-23:00")
-
-	if err != nil {
-		t.Errorf(`Unable to parse date: %v`, err)
+	inputs := []string{
+		"2023-05-29 00:00:00-13:00",
+		"2023-05-29 00:00:00+15:00",
 	}
+	for _, input := range inputs {
+		date, err := Parse(input)
 
-	_, offset := date.Zone()
-	if offset != 0 {
-		t.Errorf(`The offset should be reinitialized to 0 instead of %v because it's out of range`, offset)
+		if err != nil {
+			t.Errorf(`Unable to parse date: %v`, err)
+		}
+
+		if _, offset := date.Zone(); offset != 0 {
+			t.Errorf(`The offset should be reinitialized to 0 instead of %v because it's out of range`, offset)
+		}
 	}
 }

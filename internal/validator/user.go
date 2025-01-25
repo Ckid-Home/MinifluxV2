@@ -4,19 +4,27 @@
 package validator // import "miniflux.app/v2/internal/validator"
 
 import (
+	"slices"
+	"strings"
+	"unicode"
+
 	"miniflux.app/v2/internal/locale"
 	"miniflux.app/v2/internal/model"
 	"miniflux.app/v2/internal/storage"
 )
 
 // ValidateUserCreationWithPassword validates user creation with a password.
-func ValidateUserCreationWithPassword(store *storage.Storage, request *model.UserCreationRequest) *ValidationError {
+func ValidateUserCreationWithPassword(store *storage.Storage, request *model.UserCreationRequest) *locale.LocalizedError {
 	if request.Username == "" {
-		return NewValidationError("error.user_mandatory_fields")
+		return locale.NewLocalizedError("error.user_mandatory_fields")
 	}
 
 	if store.UserExists(request.Username) {
-		return NewValidationError("error.user_already_exists")
+		return locale.NewLocalizedError("error.user_already_exists")
+	}
+
+	if err := validateUsername(request.Username); err != nil {
+		return err
 	}
 
 	if err := validatePassword(request.Password); err != nil {
@@ -27,12 +35,12 @@ func ValidateUserCreationWithPassword(store *storage.Storage, request *model.Use
 }
 
 // ValidateUserModification validates user modifications.
-func ValidateUserModification(store *storage.Storage, userID int64, changes *model.UserModificationRequest) *ValidationError {
+func ValidateUserModification(store *storage.Storage, userID int64, changes *model.UserModificationRequest) *locale.LocalizedError {
 	if changes.Username != nil {
 		if *changes.Username == "" {
-			return NewValidationError("error.user_mandatory_fields")
+			return locale.NewLocalizedError("error.user_mandatory_fields")
 		} else if store.AnotherUserExists(userID, *changes.Username) {
-			return NewValidationError("error.user_already_exists")
+			return locale.NewLocalizedError("error.user_already_exists")
 		}
 	}
 
@@ -102,83 +110,167 @@ func ValidateUserModification(store *storage.Storage, userID int64, changes *mod
 		}
 	}
 
+	if changes.MediaPlaybackRate != nil {
+		if err := validateMediaPlaybackRate(*changes.MediaPlaybackRate); err != nil {
+			return err
+		}
+	}
+
+	if changes.BlockFilterEntryRules != nil {
+		if err := isValidFilterRules(*changes.BlockFilterEntryRules, "block"); err != nil {
+			return err
+		}
+	}
+
+	if changes.KeepFilterEntryRules != nil {
+		if err := isValidFilterRules(*changes.KeepFilterEntryRules, "keep"); err != nil {
+			return err
+		}
+	}
+
+	if changes.ExternalFontHosts != nil {
+		if !IsValidDomainList(*changes.ExternalFontHosts) {
+			return locale.NewLocalizedError("error.settings_invalid_domain_list")
+		}
+	}
+
 	return nil
 }
 
-func validateReadingSpeed(readingSpeed int) *ValidationError {
+func validateReadingSpeed(readingSpeed int) *locale.LocalizedError {
 	if readingSpeed <= 0 {
-		return NewValidationError("error.settings_reading_speed_is_positive")
+		return locale.NewLocalizedError("error.settings_reading_speed_is_positive")
 	}
 	return nil
 }
 
-func validatePassword(password string) *ValidationError {
+func validatePassword(password string) *locale.LocalizedError {
 	if len(password) < 6 {
-		return NewValidationError("error.password_min_length")
+		return locale.NewLocalizedError("error.password_min_length")
 	}
 	return nil
 }
 
-func validateTheme(theme string) *ValidationError {
+// validateUsername return an error if the `username` argument contains
+// a character that isn't alphanumerical nor `_` and `-`.
+//
+// Note: this validation should not be applied to previously created usernames,
+// and cannot be applied to Google/OIDC accounts creation because the email
+// address is used for the username field.
+func validateUsername(username string) *locale.LocalizedError {
+	if strings.ContainsFunc(username, func(r rune) bool {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return false
+		}
+		if r == '_' || r == '-' || r == '@' || r == '.' {
+			return false
+		}
+		return true
+	}) {
+		return locale.NewLocalizedError("error.invalid_username")
+	}
+	return nil
+}
+
+func validateTheme(theme string) *locale.LocalizedError {
 	themes := model.Themes()
 	if _, found := themes[theme]; !found {
-		return NewValidationError("error.invalid_theme")
+		return locale.NewLocalizedError("error.invalid_theme")
 	}
 	return nil
 }
 
-func validateLanguage(language string) *ValidationError {
-	languages := locale.AvailableLanguages()
+func validateLanguage(language string) *locale.LocalizedError {
+	languages := locale.AvailableLanguages
 	if _, found := languages[language]; !found {
-		return NewValidationError("error.invalid_language")
+		return locale.NewLocalizedError("error.invalid_language")
 	}
 	return nil
 }
 
-func validateTimezone(store *storage.Storage, timezone string) *ValidationError {
+func validateTimezone(store *storage.Storage, timezone string) *locale.LocalizedError {
 	timezones, err := store.Timezones()
 	if err != nil {
-		return NewValidationError(err.Error())
+		return locale.NewLocalizedError(err.Error())
 	}
 
 	if _, found := timezones[timezone]; !found {
-		return NewValidationError("error.invalid_timezone")
+		return locale.NewLocalizedError("error.invalid_timezone")
 	}
 	return nil
 }
 
-func validateEntryDirection(direction string) *ValidationError {
+func validateEntryDirection(direction string) *locale.LocalizedError {
 	if direction != "asc" && direction != "desc" {
-		return NewValidationError("error.invalid_entry_direction")
+		return locale.NewLocalizedError("error.invalid_entry_direction")
 	}
 	return nil
 }
 
-func validateEntriesPerPage(entriesPerPage int) *ValidationError {
+func validateEntriesPerPage(entriesPerPage int) *locale.LocalizedError {
 	if entriesPerPage < 1 {
-		return NewValidationError("error.entries_per_page_invalid")
+		return locale.NewLocalizedError("error.entries_per_page_invalid")
 	}
 	return nil
 }
 
-func validateDisplayMode(displayMode string) *ValidationError {
+func validateDisplayMode(displayMode string) *locale.LocalizedError {
 	if displayMode != "fullscreen" && displayMode != "standalone" && displayMode != "minimal-ui" && displayMode != "browser" {
-		return NewValidationError("error.invalid_display_mode")
+		return locale.NewLocalizedError("error.invalid_display_mode")
 	}
 	return nil
 }
 
-func validateGestureNav(gestureNav string) *ValidationError {
+func validateGestureNav(gestureNav string) *locale.LocalizedError {
 	if gestureNav != "none" && gestureNav != "tap" && gestureNav != "swipe" {
-		return NewValidationError("error.invalid_gesture_nav")
+		return locale.NewLocalizedError("error.invalid_gesture_nav")
 	}
 	return nil
 }
 
-func validateDefaultHomePage(defaultHomePage string) *ValidationError {
+func validateDefaultHomePage(defaultHomePage string) *locale.LocalizedError {
 	defaultHomePages := model.HomePages()
 	if _, found := defaultHomePages[defaultHomePage]; !found {
-		return NewValidationError("error.invalid_default_home_page")
+		return locale.NewLocalizedError("error.invalid_default_home_page")
+	}
+	return nil
+}
+
+func validateMediaPlaybackRate(mediaPlaybackRate float64) *locale.LocalizedError {
+	if mediaPlaybackRate < 0.25 || mediaPlaybackRate > 4 {
+		return locale.NewLocalizedError("error.settings_media_playback_rate_range")
+	}
+	return nil
+}
+
+func isValidFilterRules(filterEntryRules string, filterType string) *locale.LocalizedError {
+	// Valid Format: FieldName=RegEx\nFieldName=RegEx...
+	fieldNames := []string{"EntryTitle", "EntryURL", "EntryCommentsURL", "EntryContent", "EntryAuthor", "EntryTag", "EntryDate"}
+
+	rules := strings.Split(filterEntryRules, "\n")
+	for i, rule := range rules {
+		// Check if rule starts with a valid fieldName
+		idx := slices.IndexFunc(fieldNames, func(fieldName string) bool { return strings.HasPrefix(rule, fieldName) })
+		if idx == -1 {
+			return locale.NewLocalizedError("error.settings_"+filterType+"_rule_fieldname_invalid", i+1, "'"+strings.Join(fieldNames, "', '")+"'")
+		}
+		fieldName := fieldNames[idx]
+		fieldRegEx, _ := strings.CutPrefix(rule, fieldName)
+
+		// Check if regex begins with a =
+		if !strings.HasPrefix(fieldRegEx, "=") {
+			return locale.NewLocalizedError("error.settings_"+filterType+"_rule_separator_required", i+1)
+		}
+		fieldRegEx = strings.TrimPrefix(fieldRegEx, "=")
+
+		if fieldRegEx == "" {
+			return locale.NewLocalizedError("error.settings_"+filterType+"_rule_regex_required", i+1)
+		}
+
+		// Check if provided pattern is a valid RegEx
+		if !IsValidRegex(fieldRegEx) {
+			return locale.NewLocalizedError("error.settings_"+filterType+"_rule_invalid_regex", i+1)
+		}
 	}
 	return nil
 }
