@@ -4,14 +4,116 @@
 package parser // import "miniflux.app/v2/internal/reader/parser"
 
 import (
-	"bytes"
 	"os"
+	"strings"
 	"testing"
-
-	"miniflux.app/v2/internal/http/client"
 )
 
-func TestParseAtom(t *testing.T) {
+func BenchmarkParse(b *testing.B) {
+	var testCases = map[string][]string{
+		"large_atom.xml": {"https://dustri.org/b", ""},
+		"large_rss.xml":  {"https://dustri.org/b", ""},
+		"small_atom.xml": {"https://github.com/miniflux/v2/commits/main", ""},
+	}
+	for filename := range testCases {
+		data, err := os.ReadFile("./testdata/" + filename)
+		if err != nil {
+			b.Fatalf(`Unable to read file %q: %v`, filename, err)
+		}
+		testCases[filename][1] = string(data)
+	}
+	for range b.N {
+		for _, v := range testCases {
+			ParseFeed(v[0], strings.NewReader(v[1]))
+		}
+	}
+}
+
+func FuzzParse(f *testing.F) {
+	f.Add("https://z.org", `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Example Feed</title>
+<link href="http://z.org/"/>
+<link href="/k"/>
+<updated>2003-12-13T18:30:02Z</updated>
+<author><name>John Doe</name></author>
+<id>urn:uuid:60a76c80-d399-11d9-b93C-0003939e0af6</id>
+<entry>
+<title>a</title>
+<link href="http://example.org/b"/>
+<id>urn:uuid:1225c695-cfb8-4ebb-aaaa-80da344efa6a</id>
+<updated>2003-12-13T18:30:02Z</updated>
+<summary>c</summary>
+</entry>
+</feed>`)
+	f.Add("https://z.org", `<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>a</title>
+<link>http://z.org</link>
+<item>
+<title>a</title>
+<link>http://z.org</link>
+<description>d</description>
+<pubDate>Tue, 03 Jun 2003 09:39:21 GMT</pubDate>
+<guid>l</guid>
+</item>
+</channel>
+</rss>`)
+	f.Add("https://z.org", `<?xml version="1.0" encoding="utf-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/">
+<channel>
+<title>a</title>
+<link>http://z.org/</link>
+</channel>
+<item>
+<title>a</title>
+<link>/</link>
+<description>c</description>
+</item>
+</rdf:RDF>`)
+	f.Add("http://z.org", `{
+"version": "http://jsonfeed.org/version/1",
+"title": "a",
+"home_page_url": "http://z.org/",
+"feed_url": "http://z.org/a.json",
+"items": [
+{"id": "2","content_text": "a","url": "https://z.org/2"},
+{"id": "1","content_html": "<a","url":"http://z.org/1"}]}`)
+	f.Fuzz(func(t *testing.T, url string, data string) {
+		ParseFeed(url, strings.NewReader(data))
+	})
+}
+
+func TestParseAtom03Feed(t *testing.T) {
+	data := `<?xml version="1.0" encoding="utf-8"?>
+	<feed version="0.3" xmlns="http://purl.org/atom/ns#">
+		<title>dive into mark</title>
+		<link rel="alternate" type="text/html" href="http://diveintomark.org/"/>
+		<modified>2003-12-13T18:30:02Z</modified>
+		<author><name>Mark Pilgrim</name></author>
+		<entry>
+			<title>Atom 0.3 snapshot</title>
+			<link rel="alternate" type="text/html" href="http://diveintomark.org/2003/12/13/atom03"/>
+			<id>tag:diveintomark.org,2003:3.2397</id>
+			<issued>2003-12-13T08:29:29-04:00</issued>
+			<modified>2003-12-13T18:30:02Z</modified>
+			<summary type="text/plain">It&apos;s a test</summary>
+			<content type="text/html" mode="escaped"><![CDATA[<p>HTML content</p>]]></content>
+		</entry>
+	</feed>`
+
+	feed, err := ParseFeed("https://example.org/", strings.NewReader(data))
+	if err != nil {
+		t.Error(err)
+	}
+
+	if feed.Title != "dive into mark" {
+		t.Errorf("Incorrect title, got: %s", feed.Title)
+	}
+}
+
+func TestParseAtom10Feed(t *testing.T) {
 	data := `<?xml version="1.0" encoding="utf-8"?>
 	<feed xmlns="http://www.w3.org/2005/Atom">
 
@@ -33,7 +135,7 @@ func TestParseAtom(t *testing.T) {
 
 	</feed>`
 
-	feed, err := ParseFeed("https://example.org/", data)
+	feed, err := ParseFeed("https://example.org/", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -61,7 +163,7 @@ func TestParseAtomFeedWithRelativeURL(t *testing.T) {
 
 	</feed>`
 
-	feed, err := ParseFeed("https://example.org/blog/atom.xml", data)
+	feed, err := ParseFeed("https://example.org/blog/atom.xml", strings.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +197,7 @@ func TestParseRSS(t *testing.T) {
 	</channel>
 	</rss>`
 
-	feed, err := ParseFeed("http://liftoff.msfc.nasa.gov/", data)
+	feed, err := ParseFeed("http://liftoff.msfc.nasa.gov/", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -121,7 +223,7 @@ func TestParseRSSFeedWithRelativeURL(t *testing.T) {
 	</channel>
 	</rss>`
 
-	feed, err := ParseFeed("http://example.org/rss.xml", data)
+	feed, err := ParseFeed("http://example.org/rss.xml", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -162,7 +264,7 @@ func TestParseRDF(t *testing.T) {
 		  </item>
 		</rdf:RDF>`
 
-	feed, err := ParseFeed("http://example.org/", data)
+	feed, err := ParseFeed("http://example.org/", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -191,7 +293,7 @@ func TestParseRDFWithRelativeURL(t *testing.T) {
 		  </item>
 		</rdf:RDF>`
 
-	feed, err := ParseFeed("http://example.org/rdf.xml", data)
+	feed, err := ParseFeed("http://example.org/rdf.xml", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -229,7 +331,7 @@ func TestParseJson(t *testing.T) {
 		]
 	}`
 
-	feed, err := ParseFeed("https://example.org/feed.json", data)
+	feed, err := ParseFeed("https://example.org/feed.json", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -254,7 +356,7 @@ func TestParseJsonFeedWithRelativeURL(t *testing.T) {
 		]
 	}`
 
-	feed, err := ParseFeed("https://example.org/blog/feed.json", data)
+	feed, err := ParseFeed("https://example.org/blog/feed.json", strings.NewReader(data))
 	if err != nil {
 		t.Error(err)
 	}
@@ -289,62 +391,15 @@ func TestParseUnknownFeed(t *testing.T) {
 		</html>
 	`
 
-	_, err := ParseFeed("https://example.org/", data)
+	_, err := ParseFeed("https://example.org/", strings.NewReader(data))
 	if err == nil {
 		t.Error("ParseFeed must returns an error")
 	}
 }
 
 func TestParseEmptyFeed(t *testing.T) {
-	_, err := ParseFeed("", "")
+	_, err := ParseFeed("", strings.NewReader(""))
 	if err == nil {
 		t.Error("ParseFeed must returns an error")
-	}
-}
-
-func TestDifferentEncodingWithResponse(t *testing.T) {
-	var unicodeTestCases = []struct {
-		filename, contentType string
-		index                 int
-		title                 string
-	}{
-		// Arabic language encoded in UTF-8.
-		{"urdu_UTF8.xml", "text/xml; charset=utf-8", 0, "امریکی عسکری امداد کی بندش کی وجوہات: انڈیا سے جنگ، جوہری پروگرام اور اب دہشت گردوں کی پشت پناہی"},
-
-		// Windows-1251 encoding and not charset in HTTP header.
-		{"encoding_WINDOWS-1251.xml", "text/xml", 0, "Цитата #17703"},
-
-		// No encoding in XML, but defined in HTTP Content-Type header.
-		{"no_encoding_ISO-8859-1.xml", "application/xml; charset=ISO-8859-1", 2, "La criminalité liée surtout à... l'ennui ?"},
-
-		// ISO-8859-1 encoding defined in XML and HTTP header.
-		{"encoding_ISO-8859-1.xml", "application/rss+xml; charset=ISO-8859-1", 5, "Projekt Jedi: Microsoft will weiter mit US-Militär zusammenarbeiten"},
-
-		// UTF-8 encoding defined in RDF document and HTTP header.
-		{"rdf_UTF8.xml", "application/rss+xml; charset=utf-8", 1, "Mega-Deal: IBM übernimmt Red Hat"},
-
-		// UTF-8 encoding defined only in RDF document.
-		{"rdf_UTF8.xml", "application/rss+xml", 1, "Mega-Deal: IBM übernimmt Red Hat"},
-	}
-
-	for _, tc := range unicodeTestCases {
-		content, err := os.ReadFile("testdata/" + tc.filename)
-		if err != nil {
-			t.Fatalf(`Unable to read file %q: %v`, tc.filename, err)
-		}
-
-		r := &client.Response{Body: bytes.NewReader(content), ContentType: tc.contentType}
-		if encodingErr := r.EnsureUnicodeBody(); encodingErr != nil {
-			t.Fatalf(`Encoding error for %q: %v`, tc.filename, encodingErr)
-		}
-
-		feed, parseErr := ParseFeed("https://example.org/", r.BodyAsString())
-		if parseErr != nil {
-			t.Fatalf(`Parsing error for %q - %q: %v`, tc.filename, tc.contentType, parseErr)
-		}
-
-		if feed.Entries[tc.index].Title != tc.title {
-			t.Errorf(`Unexpected title, got %q instead of %q`, feed.Entries[tc.index].Title, tc.title)
-		}
 	}
 }
