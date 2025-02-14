@@ -4,21 +4,19 @@
 package rdf // import "miniflux.app/v2/internal/reader/rdf"
 
 import (
+	"fmt"
 	"io"
 
-	"miniflux.app/v2/internal/errors"
 	"miniflux.app/v2/internal/model"
 	"miniflux.app/v2/internal/reader/xml"
 )
 
 // Parse returns a normalized feed struct from a RDF feed.
-func Parse(baseURL string, data io.Reader) (*model.Feed, *errors.LocalizedError) {
-	feed := new(rdfFeed)
-	decoder := xml.NewDecoder(data)
-	err := decoder.Decode(feed)
-	if err != nil {
-		return nil, errors.NewLocalizedError("Unable to parse RDF feed: %q", err)
+func Parse(baseURL string, data io.ReadSeeker) (*model.Feed, error) {
+	xmlFeed := new(RDF)
+	if err := xml.NewXMLDecoder(data).Decode(xmlFeed); err != nil {
+		return nil, fmt.Errorf("rdf: unable to parse feed: %w", err)
 	}
 
-	return feed.Transform(baseURL), nil
+	return NewRDFAdapter(xmlFeed).BuildFeed(baseURL), nil
 }

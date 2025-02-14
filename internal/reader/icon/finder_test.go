@@ -4,8 +4,13 @@
 package icon // import "miniflux.app/v2/internal/reader/icon"
 
 import (
+	"bytes"
+	"encoding/base64"
+	"image"
 	"strings"
 	"testing"
+
+	"miniflux.app/v2/internal/model"
 )
 
 func TestParseImageDataURL(t *testing.T) {
@@ -41,6 +46,26 @@ func TestParseImageDataURLWithNoEncoding(t *testing.T) {
 
 	if icon.Hash == "" {
 		t.Fatal(`Image hash should be computed`)
+	}
+}
+
+func TestParseImageWithRawSVGEncodedInUTF8(t *testing.T) {
+	iconURL := `data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 456 456'><circle></circle></svg>`
+	icon, err := parseImageDataURL(iconURL)
+	if err != nil {
+		t.Fatalf(`We should be able to parse valid data URL: %v`, err)
+	}
+
+	if icon.MimeType != "image/svg+xml" {
+		t.Fatal(`Invalid mime type parsed`)
+	}
+
+	if icon.Hash == "" {
+		t.Fatal(`Image hash should be computed`)
+	}
+
+	if string(icon.Content) != `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 456 456'><circle></circle></svg>` {
+		t.Fatal(`Invalid SVG content`)
 	}
 }
 
@@ -92,59 +117,65 @@ func TestParseDocumentWithWhitespaceIconURL(t *testing.T) {
 		/static/img/favicon.ico
 	">`
 
-	iconURL, err := findIconURLFromHTMLDocument(strings.NewReader(html))
+	iconURLs, err := findIconURLsFromHTMLDocument(strings.NewReader(html), "text/html")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if iconURL != "/static/img/favicon.ico" {
-		t.Errorf(`Invalid icon URL, got %q`, iconURL)
+	if len(iconURLs) != 1 {
+		t.Fatalf(`Invalid number of icon URLs, got %d`, len(iconURLs))
+	}
+
+	if iconURLs[0] != "/static/img/favicon.ico" {
+		t.Errorf(`Invalid icon URL, got %q`, iconURLs[0])
 	}
 }
 
-func TestGenerateIconURL(t *testing.T) {
-	iconURL, err := generateIconURL("https://example.org/", "/favicon.png")
+func TestResizeIconSmallGif(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString("R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if iconURL != "https://example.org/favicon.png" {
-		t.Errorf(`Invalid icon URL, got %q`, iconURL)
+	icon := model.Icon{
+		Content:  data,
+		MimeType: "image/gif",
 	}
+	if !bytes.Equal(icon.Content, resizeIcon(&icon).Content) {
+		t.Fatalf("Converted gif smaller than 16x16")
+	}
+}
 
-	iconURL, err = generateIconURL("https://example.org/", "img/favicon.png")
+func TestResizeIconPng(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAACEAAAAhCAYAAABX5MJvAAAALUlEQVR42u3OMQEAAAgDoJnc6BpjDyRgcrcpGwkJCQkJCQkJCQkJCQkJCYmyB7NfUj/Kk4FkAAAAAElFTkSuQmCC")
 	if err != nil {
 		t.Fatal(err)
 	}
+	icon := model.Icon{
+		Content:  data,
+		MimeType: "image/png",
+	}
+	resizedIcon := resizeIcon(&icon)
 
-	if iconURL != "https://example.org/img/favicon.png" {
-		t.Errorf(`Invalid icon URL, got %q`, iconURL)
+	if bytes.Equal(data, resizedIcon.Content) {
+		t.Fatalf("Didn't convert png of 33x33")
 	}
 
-	iconURL, err = generateIconURL("https://example.org/", "https://example.org/img/favicon.png")
+	config, _, err := image.DecodeConfig(bytes.NewReader(resizedIcon.Content))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Couln't decode resulting png: %v", err)
 	}
 
-	if iconURL != "https://example.org/img/favicon.png" {
-		t.Errorf(`Invalid icon URL, got %q`, iconURL)
+	if config.Height != 32 || config.Width != 32 {
+		t.Fatalf("Was expecting an image of 16x16, got %dx%d", config.Width, config.Height)
 	}
+}
 
-	iconURL, err = generateIconURL("https://example.org/", "//example.org/img/favicon.png")
-	if err != nil {
-		t.Fatal(err)
+func TestResizeInvalidImage(t *testing.T) {
+	icon := model.Icon{
+		Content:  []byte("invalid data"),
+		MimeType: "image/gif",
 	}
-
-	if iconURL != "https://example.org/img/favicon.png" {
-		t.Errorf(`Invalid icon URL, got %q`, iconURL)
-	}
-
-	iconURL, err = generateIconURL("https://example.org/", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if iconURL != "https://example.org/favicon.ico" {
-		t.Errorf(`Invalid icon URL, got %q`, iconURL)
+	if !bytes.Equal(icon.Content, resizeIcon(&icon).Content) {
+		t.Fatalf("Tried to convert an invalid image")
 	}
 }
