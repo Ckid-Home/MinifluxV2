@@ -4,102 +4,101 @@
 package scraper // import "miniflux.app/v2/internal/reader/scraper"
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 
 	"miniflux.app/v2/internal/config"
-	"miniflux.app/v2/internal/http/client"
+	"miniflux.app/v2/internal/reader/encoding"
+	"miniflux.app/v2/internal/reader/fetcher"
 	"miniflux.app/v2/internal/reader/readability"
 	"miniflux.app/v2/internal/urllib"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
-// Fetch downloads a web page and returns relevant contents.
-func Fetch(websiteURL, rules, userAgent string, cookie string, allowSelfSignedCertificates, useProxy bool) (string, error) {
-	clt := client.NewClientWithConfig(websiteURL, config.Opts)
-	clt.WithUserAgent(userAgent)
-	clt.WithCookie(cookie)
-	if useProxy {
-		clt.WithProxy()
-	}
-	clt.AllowSelfSignedCertificates = allowSelfSignedCertificates
+func ScrapeWebsite(requestBuilder *fetcher.RequestBuilder, pageURL, rules string) (baseURL string, extractedContent string, err error) {
+	responseHandler := fetcher.NewResponseHandler(requestBuilder.ExecuteRequest(pageURL))
+	defer responseHandler.Close()
 
-	response, err := clt.Get()
-	if err != nil {
-		return "", err
+	if localizedError := responseHandler.LocalizedError(); localizedError != nil {
+		slog.Warn("Unable to scrape website", slog.String("website_url", pageURL), slog.Any("error", localizedError.Error()))
+		return "", "", localizedError.Error()
 	}
 
-	if response.HasServerFailure() {
-		return "", errors.New("scraper: unable to download web page")
-	}
-
-	if !isAllowedContentType(response.ContentType) {
-		return "", fmt.Errorf("scraper: this resource is not a HTML document (%s)", response.ContentType)
-	}
-
-	if err = response.EnsureUnicodeBody(); err != nil {
-		return "", err
+	if !isAllowedContentType(responseHandler.ContentType()) {
+		return "", "", fmt.Errorf("scraper: this resource is not a HTML document (%s)", responseHandler.ContentType())
 	}
 
 	// The entry URL could redirect somewhere else.
-	sameSite := urllib.Domain(websiteURL) == urllib.Domain(response.EffectiveURL)
-	websiteURL = response.EffectiveURL
+	sameSite := urllib.Domain(pageURL) == urllib.Domain(responseHandler.EffectiveURL())
+	pageURL = responseHandler.EffectiveURL()
 
 	if rules == "" {
-		rules = getPredefinedScraperRules(websiteURL)
+		rules = getPredefinedScraperRules(pageURL)
 	}
 
-	var content string
+	htmlDocumentReader, err := encoding.NewCharsetReader(
+		responseHandler.Body(config.Opts.HTTPClientMaxBodySize()),
+		responseHandler.ContentType(),
+	)
+
+	if err != nil {
+		return "", "", fmt.Errorf("scraper: unable to read HTML document with charset reader: %v", err)
+	}
+
 	if sameSite && rules != "" {
 		slog.Debug("Extracting content with custom rules",
-			"url", websiteURL,
+			"url", pageURL,
 			"rules", rules,
 		)
-		content, err = scrapContent(response.Body, rules)
+		baseURL, extractedContent, err = findContentUsingCustomRules(htmlDocumentReader, rules)
 	} else {
 		slog.Debug("Extracting content with readability",
-			"url", websiteURL,
+			"url", pageURL,
 		)
-		content, err = readability.ExtractContent(response.Body)
+		baseURL, extractedContent, err = readability.ExtractContent(htmlDocumentReader)
 	}
 
-	if err != nil {
-		return "", err
+	if baseURL == "" {
+		baseURL = pageURL
+	} else {
+		slog.Debug("Using base URL from HTML document", "base_url", baseURL)
 	}
 
-	return content, nil
+	return baseURL, extractedContent, nil
 }
 
-func scrapContent(page io.Reader, rules string) (string, error) {
+func findContentUsingCustomRules(page io.Reader, rules string) (baseURL string, extractedContent string, err error) {
 	document, err := goquery.NewDocumentFromReader(page)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	contents := ""
-	document.Find(rules).Each(func(i int, s *goquery.Selection) {
-		var content string
+	if hrefValue, exists := document.FindMatcher(goquery.Single("head base")).Attr("href"); exists {
+		hrefValue = strings.TrimSpace(hrefValue)
+		if urllib.IsAbsoluteURL(hrefValue) {
+			baseURL = hrefValue
+		}
+	}
 
-		content, _ = goquery.OuterHtml(s)
-		contents += content
+	document.Find(rules).Each(func(i int, s *goquery.Selection) {
+		if content, err := goquery.OuterHtml(s); err == nil {
+			extractedContent += content
+		}
 	})
 
-	return contents, nil
+	return baseURL, extractedContent, nil
 }
 
 func getPredefinedScraperRules(websiteURL string) string {
 	urlDomain := urllib.Domain(websiteURL)
+	urlDomain = strings.TrimPrefix(urlDomain, "www.")
 
-	for domain, rules := range predefinedRules {
-		if strings.Contains(urlDomain, domain) {
-			return rules
-		}
+	if rules, ok := predefinedRules[urlDomain]; ok {
+		return rules
 	}
-
 	return ""
 }
 

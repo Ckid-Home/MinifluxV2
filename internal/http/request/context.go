@@ -3,7 +3,12 @@
 
 package request // import "miniflux.app/v2/internal/http/request"
 
-import "net/http"
+import (
+	"net/http"
+	"strconv"
+
+	"miniflux.app/v2/internal/model"
+)
 
 // ContextKey represents a context key.
 type ContextKey int
@@ -24,9 +29,20 @@ const (
 	FlashMessageContextKey
 	FlashErrorMessageContextKey
 	PocketRequestTokenContextKey
+	LastForceRefreshContextKey
 	ClientIPContextKey
 	GoogleReaderToken
+	WebAuthnDataContextKey
 )
+
+func WebAuthnSessionData(r *http.Request) *model.WebAuthnSession {
+	if v := r.Context().Value(WebAuthnDataContextKey); v != nil {
+		if value, valid := v.(model.WebAuthnSession); valid {
+			return &value
+		}
+	}
+	return nil
+}
 
 // GoolgeReaderToken returns the google reader token if it exists.
 func GoolgeReaderToken(r *http.Request) string {
@@ -114,6 +130,16 @@ func PocketRequestToken(r *http.Request) string {
 	return getContextStringValue(r, PocketRequestTokenContextKey)
 }
 
+// LastForceRefresh returns the last force refresh timestamp.
+func LastForceRefresh(r *http.Request) int64 {
+	jsonStringValue := getContextStringValue(r, LastForceRefreshContextKey)
+	timestamp, err := strconv.ParseInt(jsonStringValue, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return timestamp
+}
+
 // ClientIP returns the client IP address stored in the context.
 func ClientIP(r *http.Request) string {
 	return getContextStringValue(r, ClientIPContextKey)
@@ -121,39 +147,27 @@ func ClientIP(r *http.Request) string {
 
 func getContextStringValue(r *http.Request, key ContextKey) string {
 	if v := r.Context().Value(key); v != nil {
-		value, valid := v.(string)
-		if !valid {
-			return ""
+		if value, valid := v.(string); valid {
+			return value
 		}
-
-		return value
 	}
-
 	return ""
 }
 
 func getContextBoolValue(r *http.Request, key ContextKey) bool {
 	if v := r.Context().Value(key); v != nil {
-		value, valid := v.(bool)
-		if !valid {
-			return false
+		if value, valid := v.(bool); valid {
+			return value
 		}
-
-		return value
 	}
-
 	return false
 }
 
 func getContextInt64Value(r *http.Request, key ContextKey) int64 {
 	if v := r.Context().Value(key); v != nil {
-		value, valid := v.(int64)
-		if !valid {
-			return 0
+		if value, valid := v.(int64); valid {
+			return value
 		}
-
-		return value
 	}
-
 	return 0
 }
